@@ -1,0 +1,24 @@
+{
+    // 使用 IntelliSense 了解相关属性。 
+    // 悬停以查看现有属性的描述。
+    // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Current File",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "env": {"CUDA_VISIBLE_DEVICES":"3"},
+            "args": ["--outdir", "0925",
+            "--cfg", "deepfashion",
+            "--data", "/home/zhengpeng/EVA3D/datasets/DeepFashion/images",
+            "--gpus", "1",
+            "--batch", "1",
+            "--gamma", "0.001",
+            "--is_sdf", "True"]
+        }
+    ]
+}
