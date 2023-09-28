@@ -30,6 +30,21 @@ except ImportError:
 
 def smpl2label(smpl_param):
     result = np.zeros((1,111),dtype=np.float32)
+    extrinsic = np.eye(4,dtype=np.float32)
+    extrinsic = extrinsic.reshape(1,16)
+    intrinsic = np.eye(3,dtype=np.float32)
+    # intrinsic[0,0]*=5000//8
+    # intrinsic[1,1]*=5000//8
+    # intrinsic[0,2]=5000.0/16
+    # intrinsic[1,2]=5000.0/16
+    intrinsic[0,0]=5.0
+    intrinsic[1,1]=5.0
+    intrinsic[0,2]=0.5
+    intrinsic[1,2]=0.5
+    intrinsic = intrinsic.reshape(1,9)
+    result[:,:16] = extrinsic
+    result[:,16:25] = intrinsic
+    result[:,25] = 1.0
     result[:,26:29] = smpl_param['camera_translation']
     result[:,29:32] = smpl_param['global_orient']
     result[:,32:101] = smpl_param['body_pose']
@@ -214,7 +229,12 @@ class DeepFashionDataset(Dataset):
             raise IOError('Path must point to a directory or zip')
         
         PIL.Image.init()
-        self._image_fnames = sorted(fname for fname in self._all_fnames if self._file_ext(fname) in PIL.Image.EXTENSION)
+        ##################################################
+        with open(path+'/../train_list.txt', 'r') as f:
+            lines = f.readlines()
+        self._image_fnames = sorted([l.removesuffix('\n') for l in lines])
+        ##################################################
+        # self._image_fnames = sorted(fname for fname in self._all_fnames if self._file_ext(fname) in PIL.Image.EXTENSION)
         # self._image_fnames = sorted(fname for fname in self._all_fnames if self._file_ext(fname) in PIL.Image.EXTENSION and 'img' in fname)
         if len(self._image_fnames) == 0:
             raise IOError('No image files found in the specified path')
@@ -384,12 +404,16 @@ class DeepFashionDataset(Dataset):
  
     #     return labels
 
-    def _load_raw_labels(self):
-        smpl_path = self._path + '/../smpl.pkl'
-        smpl_list = pickle.load(file=open(smpl_path, 'rb'))
+    # def _load_raw_labels(self):
+    #     smpl_path = self._path + '/../smpl.pkl'
+    #     smpl_list = pickle.load(file=open(smpl_path, 'rb'))
         
-        labels = np.concatenate([smpl2label(smpl_list[fname.removesuffix('.png')]) for fname in self._image_fnames],axis=0)
+    #     labels = np.concatenate([smpl2label(smpl_list[fname.removesuffix('.png')]) for fname in self._image_fnames],axis=0)
 
-        labels = labels.astype({1: np.int64, 2: np.float32}[labels.ndim])
+    #     labels = labels.astype({1: np.int64, 2: np.float32}[labels.ndim])
  
-        return labels
+    #     return labels
+
+    def _load_raw_labels(self):
+        smpl_list = np.load(file=open('data/dp_pose_dist.npy', 'rb'))        
+        return smpl_list

@@ -184,6 +184,8 @@ def parse_comma_separated_list(s):
 
 @click.option('--image_resolution', help='Resolution to render at', metavar='INT',  type=click.IntRange(min=1), default=256, required=False)
 @click.option('--patch_resolution', help='Resolution to render at', metavar='INT',  type=click.IntRange(min=1), default=256, required=False)
+# @click.option('--image_resolution', help='Resolution to render at', metavar='INT',  type=click.IntRange(min=1), default=512, required=False)
+# @click.option('--patch_resolution', help='Resolution to render at', metavar='INT',  type=click.IntRange(min=1), default=512, required=False)
 
 @click.option('--neural_rendering_resolution_final', help='Final resolution to render at, if blending', metavar='INT',  type=click.IntRange(min=1), required=False, default=None)
 @click.option('--neural_rendering_resolution_fade_kimg', help='Kimg to blend resolution over', metavar='INT',  type=click.IntRange(min=0), required=False, default=1000, show_default=True)

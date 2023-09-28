@@ -452,12 +452,16 @@ def training_loop(
                 image_normal = torch.cat([o['image_normal'].cpu() for o in out]).numpy()
             images_depth = -torch.cat([o['image_depth'].cpu() for o in out]).numpy()
             
-            img_fake = save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}.png'), drange=[-1,1], grid_size=grid_size)
-            img_raw = save_image_grid(image_raw, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}_raw.png'), drange=[-1,1], grid_size=grid_size)
-            img_depth = save_image_grid(images_depth, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}_depth.png'), drange=[images_depth.min(), images_depth.max()], grid_size=grid_size)
+            img_fake = save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg:09d}.png'), drange=[-1,1], grid_size=grid_size)
+            img_raw = save_image_grid(image_raw, os.path.join(run_dir, f'fakes{cur_nimg:09d}_raw.png'), drange=[-1,1], grid_size=grid_size)
+            img_depth = save_image_grid(images_depth, os.path.join(run_dir, f'fakes{cur_nimg:09d}_depth.png'), drange=[images_depth.min(), images_depth.max()], grid_size=grid_size)
             if is_normal:
-                img_normal = save_image_grid(image_normal, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}_normal.png'), drange=[-1,1], grid_size=grid_size)
-            
+                img_normal = save_image_grid(image_normal, os.path.join(run_dir, f'fakes{cur_nimg:09d}_normal.png'), drange=[-1,1], grid_size=grid_size)
+            # img_fake = save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}.png'), drange=[-1,1], grid_size=grid_size)
+            # img_raw = save_image_grid(image_raw, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}_raw.png'), drange=[-1,1], grid_size=grid_size)
+            # img_depth = save_image_grid(images_depth, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}_depth.png'), drange=[images_depth.min(), images_depth.max()], grid_size=grid_size)
+            # if is_normal:
+            #     img_normal = save_image_grid(image_normal, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}_normal.png'), drange=[-1,1], grid_size=grid_size)
             if is_normal:
                 wandb.log({"ouput_images": [wandb.Image(img_fake),wandb.Image(img_raw), wandb.Image(img_depth), wandb.Image(img_normal)]})
                 del img_normal
