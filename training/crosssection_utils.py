@@ -20,7 +20,8 @@ def sample_cross_section(G, ws, resolution=256, w=1.2):
     coordinates = torch.cat(coordinates, dim=-1).expand(ws.shape[0], -1, -1)
 
     sigma = G.sample_mixed(coordinates, torch.randn_like(coordinates), ws)['sigma']
-    return sigma.reshape(-1, 1, resolution, resolution)
+    # return sigma.reshape(-1, 1, resolution, resolution)
+    return sigma.reshape(-1, 1, resolution//2, resolution)
 
 # if __name__ == '__main__':
 #     sample_crossection(None)

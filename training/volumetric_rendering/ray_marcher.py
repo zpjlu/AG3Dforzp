@@ -52,11 +52,12 @@ class MipRayMarcher2(nn.Module):
 
         if rendering_options['is_normal']:
             composite_grad= torch.sum(weights * grads_mid, -2) + 1 - weight_total
+            # composite_grad= torch.sum(weights * grads_mid, -2) 
         else:
             composite_grad = None   
 
-        if rendering_options.get('white_back', False):
-            composite_rgb = composite_rgb + 1 - weight_total
+        # if rendering_options.get('white_back', False):
+        #     composite_rgb = composite_rgb + 1 - weight_total
 
         composite_rgb = composite_rgb * 2 - 1 # Scale to (-1, 1)
 

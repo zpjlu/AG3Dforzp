@@ -69,9 +69,18 @@ def sample_from_planes_full(plane_axes, decoder, plane_features, coordinates, ma
     projected_coordinates = project_onto_planes(plane_axes, coordinates).unsqueeze(1)
     
     output_features =  grid_sample_gradfix(plane_features, projected_coordinates.float())
-    output_features = output_features.permute(0, 3, 2, 1).reshape(N, n_planes, M, C)
-    out = decoder(output_features, None)
+    output_features = output_features.view(output_features.shape[0], 9, output_features.shape[1]//9, output_features.shape[2], output_features.shape[3])
+    out = {}
+    semantics = []
+    sigmas = []
+    for i in range(9):
+        local_feature = output_features[:,i].permute(0, 3, 2, 1).reshape(N, n_planes, M, C//9)
+        local_out = decoder(local_feature, None)
+        semantics.append(local_out['rgb'])
+        sigmas.append(local_out['sigma'])
 
+    out['rgb'] = torch.cat(semantics,1)
+    out['sigma'] = torch.sum(torch.cat(sigmas,1), 1, keepdim=True)
     out['grad'] = sdf_gradient(coordinates, out['sigma'])
     out['grad_cano'] = out['grad'].clone()
 
@@ -93,13 +102,20 @@ def sample_from_planes(plane_axes, decoder, plane_features, coordinates, mask, m
 
         projected_coordinates = project_onto_planes(plane_axes, coordinates_ib.unsqueeze(0)).unsqueeze(1).float()
         output_features = grid_sample_gradfix(plane_features[ib], projected_coordinates).squeeze(2) #(plane_features[ib], projected_coordinates).squeeze(2)
-        output_features = output_features.permute(2, 0, 1)
+        output_features = output_features.view(output_features.shape[0], 9, output_features.shape[1]//9, output_features.shape[2])
+        out = {}
+        semantics = []
+        sigmas = []
+        for i in range(9):
+            local_feature = output_features[:,i].permute(2, 0, 1)
+            local_out = decoder(local_feature, None)
+            semantics.append(local_out['rgb'])
+            sigmas.append(local_out['sigma'])
 
-        out = decoder(output_features, None)
+        out['rgb'] = torch.cat(semantics,1)
+        out['sigma'] = torch.sum(torch.cat(sigmas,1), 1, keepdim=True)
         if is_normal:
             out['grad'] = sdf_gradient(coordinates_ib, out['sigma'])
-
-
         for key in out:
             if key not in out_list:
                 out_list[key] = []
@@ -242,6 +258,7 @@ class ImportanceRenderer(torch.nn.Module):
             # normal direction fix for camera coordinate system
             out['grad_cano'] = out['grad'].clone()
             out['grad'][...,0] = -out['grad'][...,0]
+            # out['grad'][...,-1] = -out['grad'][...,-1]
             # normalize gradients in deformed space to render normal map
             out['grad'] = torch.nn.functional.normalize(out['grad'], dim=-1)
 
@@ -281,9 +298,11 @@ class ImportanceRenderer(torch.nn.Module):
                     smpl_grad = sdf_gradient(x_valid, smpl_sdf)
 
             sigma_pad[valid] = smpl_sdf.detach() + out['sigma']
+            sigma_pad[valid] = smpl_sdf.detach() 
             if self.is_normal:
                 grad_pred_pad[valid] = out['grad']
                 grad_pad[valid] = smpl_grad.detach() + out['grad']
+                grad_pad[valid] = smpl_grad.detach()
             
             if self.is_normal:
                 return rgb_pad.reshape(b,n,k,out['rgb'].shape[-1]), \
@@ -304,6 +323,7 @@ class ImportanceRenderer(torch.nn.Module):
         
         if self.is_normal:
         # normal direction fix for camera coordinate system
+            # out['grad'][...,-1] = -out['grad'][...,-1]
             out['grad'][...,0] = -out['grad'][...,0]
         # normalize gradients in deformed space to render normal map
             out['grad'] = torch.nn.functional.normalize(out['grad'], dim=-1)

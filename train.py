@@ -310,7 +310,8 @@ def main(**kwargs):
     c.loss_kwargs.filter_mode = 'antialiased' # Filter mode for raw images ['antialiased', 'none', float [0-1]]
     c.D_kwargs.disc_c_noise = opts.disc_c_noise # Regularization for discriminator pose conditioning
 
-    sr_module = 'training.superresolution.SuperresolutionHybrid2X'
+    # sr_module = 'training.superresolution.SuperresolutionHybrid2X'
+    sr_module = 'training.superresolution.NoSuperResolution'
     
     rendering_options = {
         'image_resolution': opts.image_resolution,

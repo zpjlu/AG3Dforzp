@@ -37,6 +37,7 @@ class SingleDiscriminator(torch.nn.Module):
         block_kwargs        = {},       # Arguments for DiscriminatorBlock.
         mapping_kwargs      = {},       # Arguments for MappingNetwork.
         epilogue_kwargs     = {},       # Arguments for DiscriminatorEpilogue.
+        resolution_scale    = 1,
         **kwargs
     ):
         super().__init__()
@@ -66,7 +67,7 @@ class SingleDiscriminator(torch.nn.Module):
             cur_layer_idx += block.num_layers
         if c_dim > 0:
             self.mapping = MappingNetwork(z_dim=0, c_dim=c_dim, w_dim=cmap_dim, num_ws=None, w_avg_beta=None, **mapping_kwargs)
-        self.b4 = DiscriminatorEpilogue(channels_dict[4], cmap_dim=cmap_dim, resolution=4, **epilogue_kwargs, **common_kwargs)
+        self.b4 = DiscriminatorEpilogue(channels_dict[4], cmap_dim=cmap_dim, resolution=4, resolution_scale=resolution_scale, **epilogue_kwargs, **common_kwargs)
 
     def forward(self, img, c, update_emas=False, **block_kwargs):
         img = img['image']
@@ -90,7 +91,7 @@ class SingleDiscriminator(torch.nn.Module):
 
 def filtered_resizing(image_orig_tensor, size, f, filter_mode='antialiased'):
     if filter_mode == 'antialiased':
-        ada_filtered_64 = torch.nn.functional.interpolate(image_orig_tensor, size=(size, size), mode='bilinear', align_corners=False, antialias=True)
+        ada_filtered_64 = torch.nn.functional.interpolate(image_orig_tensor, size=(size, size//2), mode='bilinear', align_corners=False, antialias=True)
     elif filter_mode == 'classic':
         ada_filtered_64 = upfirdn2d.upsample2d(image_orig_tensor, f, up=2)
         ada_filtered_64 = torch.nn.functional.interpolate(ada_filtered_64, size=(size * 2 + 2, size * 2 + 2), mode='bilinear', align_corners=False)
@@ -112,18 +113,24 @@ class AG3DDiscriminator(torch.nn.Module):
     def __init__(self, **kwargs):
         super().__init__()
 
-        self.D_image = DualDiscriminator(**kwargs)
+        # kwargs['img_resolution'] = (kwargs['img_resolution'], kwargs['img_resolution'])
+        self.D_image = DualDiscriminator(resolution_scale=2, **kwargs)
 
         kwargs_normal = kwargs.copy()
         kwargs_normal['img_resolution'] = kwargs_normal['img_resolution']//2
-        self.D_normal= SingleDiscriminator(**kwargs_normal)
+        # kwargs_normal['img_resolution'] = (kwargs_normal['img_resolution']//2, kwargs_normal['img_resolution']//4)
+        kwargs_normal['img_channels'] = 3
+        self.D_normal= SingleDiscriminator(resolution_scale=2, **kwargs_normal)
 
         kwargs_face = kwargs.copy()
+        # kwargs_face['img_resolution'] = (kwargs_face['img_resolution']//8, kwargs_face['img_resolution']//8)
         kwargs_face['img_resolution'] = kwargs_face['img_resolution']//8
         self.D_face_image= SingleDiscriminator(**kwargs_face)
 
         kwargs_face_normal = kwargs.copy()
         kwargs_face_normal['img_resolution'] = kwargs_face_normal['img_resolution']//16
+        # kwargs_face_normal['img_resolution'] = (kwargs_face_normal['img_resolution']//16, kwargs_face_normal['img_resolution']//16)
+        kwargs_face_normal['img_channels'] = 3
         self.D_face_normal= SingleDiscriminator(**kwargs_face_normal)
 
     def forward(self, img, c, update_emas=False, normal_gan=False, face_gan=False, **block_kwargs):
@@ -166,11 +173,13 @@ class DualDiscriminator(torch.nn.Module):
         mapping_kwargs      = {},       # Arguments for MappingNetwork.
         epilogue_kwargs     = {},       # Arguments for DiscriminatorEpilogue.
         is_sr_module        = False,
+        resolution_scale    = 1
     ):
         super().__init__()
         img_channels *= 2
         self.c_dim = c_dim
         self.img_resolution = img_resolution
+        # self.resolution_scale = resolution_scale
         self.img_resolution_log2 = int(np.log2(img_resolution))
         self.img_channels = img_channels
         self.block_resolutions = [2 ** i for i in range(self.img_resolution_log2, 2, -1)]
@@ -196,14 +205,14 @@ class DualDiscriminator(torch.nn.Module):
             cur_layer_idx += block.num_layers
         if c_dim > 0:
             self.mapping = MappingNetwork(z_dim=0, c_dim=c_dim, w_dim=cmap_dim, num_ws=None, w_avg_beta=None, **mapping_kwargs)
-        self.b4 = DiscriminatorEpilogue(channels_dict[4], cmap_dim=cmap_dim, resolution=4, **epilogue_kwargs, **common_kwargs)
+        self.b4 = DiscriminatorEpilogue(channels_dict[4], cmap_dim=cmap_dim, resolution=4, resolution_scale= resolution_scale, **epilogue_kwargs, **common_kwargs)
         self.register_buffer('resample_filter', upfirdn2d.setup_filter([1,3,3,1]))
         self.disc_c_noise = disc_c_noise
         
 
     def forward(self, img, c, update_emas=False, **block_kwargs):
         
-        image_raw = filtered_resizing(img['image_raw'], size=img['image'].shape[-1], f=self.resample_filter)
+        image_raw = filtered_resizing(img['image_raw'], size=img['image'].shape[-2], f=self.resample_filter)
         img = torch.cat([img['image'], image_raw], 1)            
         
         _ = update_emas # unused
@@ -239,6 +248,7 @@ class DummyDualDiscriminator(torch.nn.Module):
         block_kwargs        = {},       # Arguments for DiscriminatorBlock.
         mapping_kwargs      = {},       # Arguments for MappingNetwork.
         epilogue_kwargs     = {},       # Arguments for DiscriminatorEpilogue.
+        resolution_scale    = 1
     ):
         super().__init__()
         img_channels *= 1
@@ -269,7 +279,7 @@ class DummyDualDiscriminator(torch.nn.Module):
             cur_layer_idx += block.num_layers
         if c_dim > 0:
             self.mapping = MappingNetwork(z_dim=0, c_dim=c_dim, w_dim=cmap_dim, num_ws=None, w_avg_beta=None, **mapping_kwargs)
-        self.b4 = DiscriminatorEpilogue(channels_dict[4], cmap_dim=cmap_dim, resolution=4, **epilogue_kwargs, **common_kwargs)
+        self.b4 = DiscriminatorEpilogue(channels_dict[4], cmap_dim=cmap_dim, resolution=4, resolution_scale=resolution_scale, **epilogue_kwargs, **common_kwargs)
         self.register_buffer('resample_filter', upfirdn2d.setup_filter([1,3,3,1]))
 
         self.raw_fade = 1

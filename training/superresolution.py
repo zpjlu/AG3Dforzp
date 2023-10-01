@@ -125,10 +125,15 @@ class NoSuperResolution(torch.nn.Module):
     def __init__(self, channels, img_resolution, sr_num_fp16_res, sr_antialias,
             num_fp16_res=4, conv_clamp=None, channel_base=None, channel_max=None,# IGNORE
             **block_kwargs):
+        super().__init__()
+        self.output_resolution = img_resolution
+        self.sr_antialias = sr_antialias
         pass
 
     def forward(self, rgb, x, ws, **block_kwargs):
-
+        # rgb = torch.nn.functional.interpolate(rgb, size=(self.output_resolution, self.output_resolution),
+        rgb = torch.nn.functional.interpolate(rgb, size=(self.output_resolution, self.output_resolution//2),
+                                                  mode='bilinear', align_corners=False, antialias=self.sr_antialias)
         return rgb
 #----------------------------------------------------------------------------
 

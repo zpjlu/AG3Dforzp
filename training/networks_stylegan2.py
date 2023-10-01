@@ -17,6 +17,7 @@ https://github.com/NVlabs/stylegan2/blob/master/training/networks_stylegan2.py""
 
 import numpy as np
 import torch
+import random
 from torch_utils import misc
 from torch_utils import persistence
 from torch_utils.ops import conv2d_resample
@@ -275,6 +276,138 @@ class MappingNetwork(torch.nn.Module):
 #----------------------------------------------------------------------------
 
 @persistence.persistent_class
+class SemanticMappingNetwork(torch.nn.Module):
+    def __init__(self,
+        z_dim,                      # Input latent (Z) dimensionality, 0 = no latent.
+        c_dim,                      # Conditioning label (C) dimensionality, 0 = no label.
+        w_dim,                      # Intermediate latent (W) dimensionality.
+        num_ws,                     # Number of intermediate latents to output, None = do not broadcast.
+        num_layers      = 8,        # Number of mapping layers.
+        embed_features  = None,     # Label embedding dimensionality, None = same as w_dim.
+        layer_features  = None,     # Number of intermediate features in the mapping layers, None = same as w_dim.
+        activation      = 'lrelu',  # Activation function: 'relu', 'lrelu', etc.
+        lr_multiplier   = 0.01,     # Learning rate multiplier for the mapping layers.
+        w_avg_beta      = 0.998,    # Decay for tracking the moving average of W during training, None = do not track.
+    ):
+        super().__init__()
+        self.z_dim = z_dim
+        self.c_dim = c_dim
+        self.w_dim = w_dim
+        self.num_ws = num_ws
+        self.num_layers = num_layers
+        self.w_avg_beta = w_avg_beta
+        self.n_branch = 9
+        self.n_latent = self.n_branch*2
+        if embed_features is None:
+            embed_features = w_dim
+        if c_dim == 0:
+            embed_features = 0
+        if layer_features is None:
+            layer_features = w_dim
+        features_list = [z_dim + embed_features] + [layer_features] * (num_layers - 1) + [w_dim]
+
+        if c_dim > 0:
+            self.embed = FullyConnectedLayer(c_dim, embed_features)
+        for idx in range(num_layers):
+            in_features = features_list[idx]
+            out_features = features_list[idx + 1]
+            layer = FullyConnectedLayer(in_features, out_features, activation=activation, lr_multiplier=lr_multiplier)
+            setattr(self, f'fc{idx}', layer)
+
+        if num_ws is not None and w_avg_beta is not None:
+            self.register_buffer('w_avg', torch.zeros([w_dim]))
+
+    def style(self, z, c, update_emas=False):
+        with torch.autograd.profiler.record_function('input'):
+            if self.z_dim > 0:
+                misc.assert_shape(z, [None, self.z_dim])
+                x = normalize_2nd_moment(z.to(torch.float32))
+            if self.c_dim > 0:
+                misc.assert_shape(c, [None, self.c_dim])
+                y = normalize_2nd_moment(self.embed(c.to(torch.float32)))
+                x = torch.cat([x, y], dim=1) if x is not None else y
+
+        # Main layers.
+        for idx in range(self.num_layers):
+            layer = getattr(self, f'fc{idx}')
+            x = layer(x)
+
+        # Update moving average of W.
+        if update_emas and self.w_avg_beta is not None:
+            with torch.autograd.profiler.record_function('update_w_avg'):
+                self.w_avg.copy_(x.detach().mean(dim=0).lerp(self.w_avg, self.w_avg_beta))
+        return x
+    
+    def expand_latents(self, latent):
+        assert latent.ndim == 3
+        assert latent.size(1) == self.n_latent
+        latent_expanded = []
+        for i in range(self.n_branch):
+            latent_expanded.append( latent[:,2*i].unsqueeze(1).repeat(1,self.num_ws,1) )
+            latent_expanded.append( latent[:,2*i+1].unsqueeze(1).repeat(1,self.num_ws,1) )
+
+        latent_expanded = torch.cat(latent_expanded, 1)
+
+        return latent_expanded
+    def mix_styles(self, styles, inject_index=None):
+        if len(styles) < 2:
+            if styles[0].ndim < 3:
+                latent = styles[0].unsqueeze(1).repeat(1, self.n_latent, 1)
+            else:
+                latent = styles[0]
+        elif len(styles) > 2:
+            latent = torch.stack(styles, 1)
+        else:
+            latent = []
+            for i in range(self.n_branch):
+                N = styles[0].size(0)
+                latent1 = []
+                latent2 = []
+                for j in range(N):
+                    inject_index = random.randint(0, 2)
+                    if inject_index == 0:
+                        latent1_ = latent2_ = styles[0][j]
+                    elif inject_index == 1:
+                        latent1_, latent2_ = styles[0][j], styles[1][j]
+                    else:
+                        latent1_ = latent2_ = styles[1][j]
+                    latent1.append(latent1_)
+                    latent2.append(latent2_)
+                latent1 = torch.stack(latent1)
+                latent2 = torch.stack(latent2)
+                latent.append(latent1.unsqueeze(1))
+                latent.append(latent2.unsqueeze(1))
+            latent = torch.cat(latent, 1)
+        latent = self.expand_latents(latent)
+
+        return latent
+    def forward(self, z, c, truncation_psi=1, truncation_cutoff=None, update_emas=False, mix_styles=True, inject_index=None):
+        # Embed, normalize, and concat inputs.
+        styles = [self.style(s, c, update_emas=update_emas) for s in z]
+
+        if truncation_psi < 1:
+            style_t = []
+
+            for style in styles:
+                style_t.append(
+                    self.w_avg + truncation_psi * (style - self.w_avg)
+                )
+
+            styles = style_t
+        
+        styles_global = styles
+        
+        if mix_styles:
+            styles = self.mix_styles(styles, inject_index)
+
+        return styles
+
+    def extra_repr(self):
+        return f'z_dim={self.z_dim:d}, c_dim={self.c_dim:d}, w_dim={self.w_dim:d}, num_ws={self.num_ws:d}'
+
+#----------------------------------------------------------------------------
+
+@persistence.persistent_class
 class SynthesisLayer(torch.nn.Module):
     def __init__(self,
         in_channels,                    # Number of input channels.
@@ -306,6 +439,7 @@ class SynthesisLayer(torch.nn.Module):
         memory_format = torch.channels_last if channels_last else torch.contiguous_format
         self.weight = torch.nn.Parameter(torch.randn([out_channels, in_channels, kernel_size, kernel_size]).to(memory_format=memory_format))
         if use_noise:
+            # self.register_buffer('noise_const', torch.randn([resolution, resolution//2]))
             self.register_buffer('noise_const', torch.randn([resolution, resolution]))
             self.noise_strength = torch.nn.Parameter(torch.zeros([]))
         self.bias = torch.nn.Parameter(torch.zeros([out_channels]))
@@ -313,11 +447,13 @@ class SynthesisLayer(torch.nn.Module):
     def forward(self, x, w, noise_mode='random', fused_modconv=True, gain=1):
         assert noise_mode in ['random', 'const', 'none']
         in_resolution = self.resolution // self.up
+        # misc.assert_shape(x, [None, self.in_channels, in_resolution//2, in_resolution])
         misc.assert_shape(x, [None, self.in_channels, in_resolution, in_resolution])
         styles = self.affine(w)
 
         noise = None
         if self.use_noise and noise_mode == 'random':
+            # noise = torch.randn([x.shape[0], 1, self.resolution//2, self.resolution], device=x.device) * self.noise_strength
             noise = torch.randn([x.shape[0], 1, self.resolution, self.resolution], device=x.device) * self.noise_strength
         if self.use_noise and noise_mode == 'const':
             noise = self.noise_const * self.noise_strength
@@ -397,6 +533,7 @@ class SynthesisBlock(torch.nn.Module):
 
         if in_channels == 0:
             self.const = torch.nn.Parameter(torch.randn([out_channels, resolution, resolution]))
+            # self.const = torch.nn.Parameter(torch.randn([out_channels, resolution//2, resolution]))
 
         if in_channels != 0:
             self.conv0 = SynthesisLayer(in_channels, out_channels, w_dim=w_dim, resolution=resolution, up=2,
@@ -435,6 +572,7 @@ class SynthesisBlock(torch.nn.Module):
             x = x.unsqueeze(0).repeat([ws.shape[0], 1, 1, 1])
         else:
             misc.assert_shape(x, [None, self.in_channels, self.resolution // 2, self.resolution // 2])
+            # misc.assert_shape(x, [None, self.in_channels, self.resolution // 4, self.resolution // 2])
             x = x.to(dtype=dtype, memory_format=memory_format)
 
         # Main layers.
@@ -452,6 +590,7 @@ class SynthesisBlock(torch.nn.Module):
         # ToRGB.
         if img is not None:
             misc.assert_shape(img, [None, self.img_channels, self.resolution // 2, self.resolution // 2])
+            # misc.assert_shape(img, [None, self.img_channels, self.resolution // 4, self.resolution // 2])
             img = upfirdn2d.upsample2d(img, self.resample_filter)
         if self.is_last or self.architecture == 'skip':
             y = self.torgb(x, next(w_iter), fused_modconv=fused_modconv)
@@ -556,6 +695,43 @@ class Generator(torch.nn.Module):
 #----------------------------------------------------------------------------
 
 @persistence.persistent_class
+class SemanticGenerator(torch.nn.Module):
+    def __init__(self,
+        z_dim,                      # Input latent (Z) dimensionality.
+        c_dim,                      # Conditioning label (C) dimensionality.
+        w_dim,                      # Intermediate latent (W) dimensionality.
+        img_resolution,             # Output resolution.
+        img_channels,               # Number of output color channels.
+        mapping_kwargs      = {},   # Arguments for MappingNetwork.
+        **synthesis_kwargs,         # Arguments for SynthesisNetwork.
+    ):
+        super().__init__()
+        self.z_dim = z_dim
+        self.c_dim = c_dim
+        self.w_dim = w_dim
+        self.img_resolution = img_resolution
+        self.img_channels = img_channels
+        self.synthesis_net = torch.nn.ModuleList()
+        for i in range(9):
+            self.synthesis_net.append(SynthesisNetwork(w_dim=w_dim, img_resolution=img_resolution, img_channels=img_channels, **synthesis_kwargs))
+        self.num_ws = self.synthesis_net[0].num_ws
+        self.mapping = SemanticMappingNetwork(z_dim=z_dim, c_dim=c_dim, w_dim=w_dim, num_ws=self.num_ws, **mapping_kwargs)
+        # self.mapping = MappingNetwork(z_dim=z_dim, c_dim=c_dim, w_dim=w_dim, num_ws=self.num_ws, **mapping_kwargs)
+
+    def synthesis(self, ws, update_emas, **synthesis_kwargs):
+        imgs = []
+        for i in range(len(self.synthesis_net)):
+            branch_ws = ws[:, i*self.num_ws*2 : i*self.num_ws*2+self.num_ws]
+            img = self.synthesis_net[i](branch_ws, update_emas=update_emas, **synthesis_kwargs)
+            imgs.append(img.view(img.shape[0], 3, img.shape[1]//3,img.shape[2],img.shape[3]))
+        return torch.cat(imgs,2)
+    def forward(self, z, c, truncation_psi=1, truncation_cutoff=None, update_emas=False, **synthesis_kwargs):
+        ws = self.mapping(z, c, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff, update_emas=update_emas)
+        img = self.synthesis(ws, update_emas=update_emas, **synthesis_kwargs)
+        return img
+
+#----------------------------------------------------------------------------
+@persistence.persistent_class
 class DiscriminatorBlock(torch.nn.Module):
     def __init__(self,
         in_channels,                        # Number of input channels, 0 = first block.
@@ -615,12 +791,12 @@ class DiscriminatorBlock(torch.nn.Module):
 
         # Input.
         if x is not None:
-            misc.assert_shape(x, [None, self.in_channels, self.resolution, self.resolution])
+            # misc.assert_shape(x, [None, self.in_channels, self.resolution, self.resolution//2])
             x = x.to(dtype=dtype, memory_format=memory_format)
 
         # FromRGB.
         if self.in_channels == 0 or self.architecture == 'skip':
-            misc.assert_shape(img, [None, self.img_channels, self.resolution, self.resolution])
+            # misc.assert_shape(img, [None, self.img_channels, self.resolution, self.resolution//2])
             img = img.to(dtype=dtype, memory_format=memory_format)
             y = self.fromrgb(img)
             x = x + y if x is not None else y
@@ -685,6 +861,7 @@ class DiscriminatorEpilogue(torch.nn.Module):
         mbstd_num_channels  = 1,        # Number of features for the minibatch standard deviation layer, 0 = disable.
         activation          = 'lrelu',  # Activation function: 'relu', 'lrelu', etc.
         conv_clamp          = None,     # Clamp the output of convolution layers to +-X, None = disable clamping.
+        resolution_scale    = 1
     ):
         assert architecture in ['orig', 'skip', 'resnet']
         super().__init__()
@@ -698,11 +875,11 @@ class DiscriminatorEpilogue(torch.nn.Module):
             self.fromrgb = Conv2dLayer(img_channels, in_channels, kernel_size=1, activation=activation)
         self.mbstd = MinibatchStdLayer(group_size=mbstd_group_size, num_channels=mbstd_num_channels) if mbstd_num_channels > 0 else None
         self.conv = Conv2dLayer(in_channels + mbstd_num_channels, in_channels, kernel_size=3, activation=activation, conv_clamp=conv_clamp)
-        self.fc = FullyConnectedLayer(in_channels * (resolution ** 2), in_channels, activation=activation)
+        self.fc = FullyConnectedLayer(in_channels * (resolution ** 2)//resolution_scale, in_channels, activation=activation)
         self.out = FullyConnectedLayer(in_channels, 1 if cmap_dim == 0 else cmap_dim)
 
     def forward(self, x, img, cmap, force_fp32=False):
-        misc.assert_shape(x, [None, self.in_channels, self.resolution, self.resolution]) # [NCHW]
+        # misc.assert_shape(x, [None, self.in_channels, self.resolution//2, self.resolution]) # [NCHW]
         _ = force_fp32 # unused
         dtype = torch.float32
         memory_format = torch.contiguous_format
@@ -710,7 +887,7 @@ class DiscriminatorEpilogue(torch.nn.Module):
         # FromRGB.
         x = x.to(dtype=dtype, memory_format=memory_format)
         if self.architecture == 'skip':
-            misc.assert_shape(img, [None, self.img_channels, self.resolution, self.resolution])
+            misc.assert_shape(img, [None, self.img_channels, self.resolution//2, self.resolution])
             img = img.to(dtype=dtype, memory_format=memory_format)
             x = x + self.fromrgb(img)
 

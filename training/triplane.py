@@ -18,7 +18,8 @@ Code adapted from
 
 import torch
 from torch_utils import persistence
-from training.networks_stylegan2 import Generator as StyleGAN2Backbone
+# from training.networks_stylegan2 import Generator as StyleGAN2Backbone
+from training.networks_stylegan2 import SemanticGenerator as StyleGAN2Backbone
 from training.volumetric_rendering.renderer import ImportanceRenderer
 from training.volumetric_rendering.ray_sampler import RaySampler
 import dnnlib
@@ -50,8 +51,10 @@ class AG3DGenerator(torch.nn.Module):
         self.img_channels=img_channels
         self.renderer = ImportanceRenderer()
         self.ray_sampler = RaySampler()
-        self.backbone = StyleGAN2Backbone(z_dim, c_dim, w_dim, img_resolution=256, img_channels=32*3, mapping_kwargs=mapping_kwargs, **synthesis_kwargs)
-        self.decoder = OSGDecoder(32, {'decoder_lr_mul': rendering_kwargs.get('decoder_lr_mul', 1), 'decoder_output_dim': 32})
+        self.backbone = StyleGAN2Backbone(z_dim, c_dim, w_dim, img_resolution=256, img_channels=8*3, mapping_kwargs=mapping_kwargs, **synthesis_kwargs)
+        # self.backbone = StyleGAN2Backbone(z_dim, c_dim, w_dim, img_resolution=256, img_channels=32*3, mapping_kwargs=mapping_kwargs, **synthesis_kwargs)
+        self.decoder = OSGDecoder(8, {'decoder_lr_mul': rendering_kwargs.get('decoder_lr_mul', 1), 'decoder_output_dim': 1})
+        # self.decoder = OSGDecoder(32, {'decoder_lr_mul': rendering_kwargs.get('decoder_lr_mul', 1), 'decoder_output_dim': 32})
         self.superresolution = dnnlib.util.construct_class_by_name(class_name=rendering_kwargs['superresolution_module'], channels=32, img_resolution=img_resolution, sr_num_fp16_res=sr_num_fp16_res, sr_antialias=rendering_kwargs['sr_antialias'], **sr_kwargs)
 
         self.neural_rendering_resolution = img_resolution//2
@@ -98,15 +101,17 @@ class AG3DGenerator(torch.nn.Module):
             planes = self.backbone.synthesis(ws, update_emas=update_emas, **synthesis_kwargs)
         if cache_backbone:
             self._last_planes = planes
-
         # Reshape output into three 32-channel planes
-        planes = planes.view(len(planes), 3, 32, planes.shape[-2], planes.shape[-1])
+        # planes = planes.view(len(planes), 3, 32, planes.shape[-2], planes.shape[-1])
+        # planes = planes.view(len(planes), 9, 3, -1, planes.shape[-2], planes.shape[-1])
 
         # Perform volume rendering
         feature_samples, depth_samples, weights_samples, grad_samples, grad_cano_samples, sdf_samples = self.renderer(planes, self.decoder, ray_origins, ray_directions, smpl_params, self.rendering_kwargs) # channels last
 
         # Reshape into 'raw' neural-rendered image
-        H = W = neural_rendering_resolution
+        # H = W = neural_rendering_resolution
+        H = neural_rendering_resolution
+        W = H//2
         
         feature_image = feature_samples.permute(0, 2, 1).reshape(N, feature_samples.shape[-1], H, W)
     
@@ -118,7 +123,9 @@ class AG3DGenerator(torch.nn.Module):
             grad_image = None
 
         # Run superresolution to get final image
-        rgb_image = feature_image[:, :self.img_channels]
+        #############################################
+        # rgb_image = feature_image[:, :self.img_channels]
+        rgb_image = feature_image
 
         sr_image = self.superresolution(rgb_image.clone(), feature_image, ws, noise_mode=self.rendering_kwargs['superresolution_noise_mode'], **{k:synthesis_kwargs[k] for k in synthesis_kwargs.keys() if k != 'noise_mode'})
 
@@ -140,7 +147,7 @@ class AG3DGenerator(torch.nn.Module):
     def sample_mixed(self, coordinates, directions, ws, truncation_psi=1, truncation_cutoff=None, update_emas=False, smpl_params=None, **synthesis_kwargs):
         # Same as sample, but expects latent vectors 'ws' instead of Gaussian noise 'z'
         planes = self.backbone.synthesis(ws, update_emas = update_emas, **synthesis_kwargs)
-        planes = planes.view(len(planes), 3, 32, planes.shape[-2], planes.shape[-1])
+        # planes = planes.view(len(planes), 3, 32, planes.shape[-2], planes.shape[-1])
         return self.renderer.run_model(planes, self.decoder, coordinates, directions, self.rendering_kwargs,smpl_params=smpl_params)
 
     def forward(self, z, c, truncation_psi=1, truncation_cutoff=None, neural_rendering_resolution=None, update_emas=False, cache_backbone=False, use_cached_backbone=False, patch_params=None, cano=False, **synthesis_kwargs):
@@ -232,7 +239,8 @@ from training.networks_stylegan2 import FullyConnectedLayer
 class OSGDecoder(torch.nn.Module):
     def __init__(self, n_features, options):
         super().__init__()
-        self.hidden_dim = 64
+        self.hidden_dim = 16
+        # self.hidden_dim = 64
 
         self.net = torch.nn.Sequential(
             FullyConnectedLayer(n_features, self.hidden_dim, lr_multiplier=options['decoder_lr_mul']),
@@ -249,7 +257,8 @@ class OSGDecoder(torch.nn.Module):
             x = sampled_features.flatten(0,1)
 
         x = self.net(x)
-        rgb = torch.sigmoid(x[..., 1:])*(1 + 2*0.001) - 0.001 # Uses sigmoid clamping from MipNeRF
+        rgb = x[..., 1:] # Uses sigmoid clamping from MipNeRF
+        # rgb = torch.sigmoid(x[..., 1:])*(1 + 2*0.001) - 0.001 # Uses sigmoid clamping from MipNeRF
         sigma = x[..., 0:1]
         return {'rgb': rgb, 'sigma': sigma}
 

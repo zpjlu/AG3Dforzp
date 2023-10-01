@@ -82,13 +82,13 @@ class AG3DLoss(Loss):
                 ws[:, cutoff:] = self.G.mapping(torch.randn_like(z), c, update_emas=False)[:, cutoff:]
 
         gen_output = self.G.synthesis(ws, c, neural_rendering_resolution=self.neural_rendering_resolution_initial, update_emas=update_emas)
-        gen_output['image_face'] = crop_face(gen_output['image'], c, size=gen_output['image'].shape[-1]//8)
+        gen_output['image_face'] = crop_face(gen_output['image'], c, size=gen_output['image'].shape[-2]//8)
         
         if not self.is_normal:
             del gen_output['image_normal']
             del gen_output['grad_cano']
         if self.is_normal:
-            gen_output['normal_face'] = crop_face(gen_output['image_normal'], c,size=gen_output['image_normal'].shape[-1]//8)
+            gen_output['normal_face'] = crop_face(gen_output['image_normal'], c,size=gen_output['image_normal'].shape[-2]//8)
 
         return gen_output, ws
 
@@ -136,8 +136,8 @@ class AG3DLoss(Loss):
         real_img = {'image': real_img,
                     'image_raw': real_img_raw,
                     'image_normal': real_seg, 
-                    'image_face': crop_face(real_img, real_c, size=real_img.shape[-1]//8),
-                    'normal_face': crop_face(real_seg, real_c, size=real_seg.shape[-1]//8),
+                    'image_face': crop_face(real_img, real_c, size=real_img.shape[-2]//8),
+                    'normal_face': crop_face(real_seg, real_c, size=real_seg.shape[-2]//8),
                     }
         
         # Gmain: Maximize logits for generated images.

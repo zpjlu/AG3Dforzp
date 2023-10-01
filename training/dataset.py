@@ -28,6 +28,41 @@ try:
 except ImportError:
     pyspng = None
 
+CLASSES_24 = ['background','top','outer','skirt', 'dress', 'pants', 'leggings', 'headwear', 'eyeglass', 'neckwear', 'belt', 'footwear', 'bag', \
+     'hair', 'face', 'skin', 'ring', 'wrist wearing', 'socks', 'gloves', 'necklace', 'rompers', 'earrings', 'tie']
+def png_to_mask(mask):
+    label = []
+    for i in range(len(CLASSES_24)):
+        mask_local = 1.0*(i==mask)
+        # if i in [2,4,5,10,11,12]:
+        #     mask_local = cv2.dilate(mask_local, self.kernel_3, 1)
+        # # slightly expanding the small areas of the face mask helps the CNeRF learn better.
+        # if i in [6,7]:
+        #     mask_local = cv2.dilate(mask_local, self.kernel_4, 1)
+        # if i in [8,9]:
+        #     mask_local = cv2.dilate(mask_local, self.kernel_5, 1)
+        label.append(mask_local)
+    label_fusion = []
+    # label_fusion.append(label[0]) # back
+    label_fusion.append(label[15]+label[14]) # body
+    label_fusion.append(label[13]) # hair
+    label_fusion.append(label[1]+label[4]+label[21]) # top
+    label_fusion.append(label[2]) # outer
+    label_fusion.append(label[3]+label[4]+label[5]+label[6]) # pants
+    label_fusion.append(label[8]) # glass
+    # label_fusion.append(label[9]) # neckwear
+    # label_fusion.append(label[10]) # belt
+    label_fusion.append(label[18]) # sock
+    label_fusion.append(label[11]) # shoe
+    # label_fusion.append(label[12]) # bag
+    label_fusion.append(label[7]+label[9]+label[10]+label[12]+label[16]+label[17]+label[19]+label[20]+label[22]+label[23]) # other
+
+    mask = np.array(label_fusion)
+    mask = np.clip(mask,0,1)
+    mask = mask*2-1
+
+    return mask
+
 def smpl2label(smpl_param):
     result = np.zeros((1,111),dtype=np.float32)
     extrinsic = np.eye(4,dtype=np.float32)
@@ -182,7 +217,7 @@ class Dataset(torch.utils.data.Dataset):
     @property
     def resolution(self):
         assert len(self.image_shape) == 3 # CHW
-        assert self.image_shape[1] == self.image_shape[2]
+        # assert self.image_shape[1] == self.image_shape[2]
         return self.image_shape[1]
 
     @property
@@ -265,7 +300,10 @@ class DeepFashionDataset(Dataset):
         return None
 
     def _open_normal(self, fname):
-        return open(os.path.join(self._path.replace('images','normal'), fname), 'rb')
+        return open(os.path.join(self._path.replace('images','normal2'), fname), 'rb')
+
+    def _open_seg(self, fname):
+        return open(os.path.join(self._path.replace('images','segm'), fname.replace('.png', '_segm.png')), 'rb')
 
     def close(self):
         try:
@@ -277,10 +315,14 @@ class DeepFashionDataset(Dataset):
     def __getstate__(self):
         return dict(super().__getstate__(), _zipfile=None)
 
+    def __len__(self):
+        return len(self._image_fnames)
+
     def __getitem__(self, idx):
-        
-        
-        image, normal = self._load_raw_image(self._raw_idx[idx])
+        try:
+            image, normal, seg = self._load_raw_image(self._raw_idx[idx])
+        except:
+            return self.__getitem__((idx + 1) % self.__len__())
         assert isinstance(image, np.ndarray)
         assert list(image.shape) == self.image_shape
         assert image.dtype == np.uint8
@@ -288,8 +330,10 @@ class DeepFashionDataset(Dataset):
             assert image.ndim == 3 # CHW
             image = image[:, :, ::-1]
             normal = normal[:, :, ::-1]
+            seg = seg[:, :, ::-1]
             # seg = seg[:, :, ::-1]
-        return image.copy(), normal.copy(), self.get_label(idx)
+        # return image.copy(), normal.copy(), self.get_label(idx)
+        return image.copy(), normal.copy(), seg.copy(), self.get_label(idx)
 
     def _load_raw_image(self, raw_idx):
         fname = self._image_fnames[raw_idx]
@@ -302,6 +346,14 @@ class DeepFashionDataset(Dataset):
         if image.ndim == 2:
             image = image[:, :, np.newaxis] # HW => HWC
         
+        with self._open_seg(fname) as f:
+            # if pyspng is not None and self._file_ext(fname) == '.png':
+            #     seg = pyspng.load(f.read())[...,0]
+            # else:
+            # seg = np.array(PIL.Image.open(f).resize((self._resolution, self._resolution), PIL.Image.HAMMING))
+            seg = np.array(PIL.Image.open(f).resize((self._resolution//2, self._resolution), PIL.Image.HAMMING))
+        seg = png_to_mask(seg)
+
         # fname = self._image_fnames[raw_idx].replace('img','normal')
         with self._open_normal(fname) as f:
             if pyspng is not None and self._file_ext(fname) == '.png':
@@ -309,8 +361,8 @@ class DeepFashionDataset(Dataset):
             else:
                 normal = np.array(PIL.Image.open(f))
 
-        normal_mask = ((normal==0)).all(axis = -1)  #((normal==127) | (normal==128 )).all(axis = -1) 
-        # normal_mask = ((normal==255)).all(axis = -1)  #((normal==127) | (normal==128 )).all(axis = -1) 
+        # normal_mask = ((normal==0)).all(axis = -1)  #((normal==127) | (normal==128 )).all(axis = -1) 
+        normal_mask = ((normal==255)).all(axis = -1)  #((normal==127) | (normal==128 )).all(axis = -1) 
         normal = (normal / 255.0) * 2 - 1
         normal = normal / (np.linalg.norm(normal, axis=-1,keepdims=True)+1e-8)
         normal = (normal + 1) * 127.5
@@ -327,14 +379,13 @@ class DeepFashionDataset(Dataset):
             
 
         if self._resolution and image.shape[0] != self._resolution:
-            image = cv2.resize(image, (self._resolution, self._resolution))
-        if self._resolution and normal.shape[0] != self._resolution:
-            normal = cv2.resize(normal, (self._resolution, self._resolution))
-
+            image = cv2.resize(image, (self._resolution//2, self._resolution))
+            normal = cv2.resize(normal, (self._resolution//2, self._resolution))
+            
         image = image.transpose(2, 0, 1) # HWC => CHW
         normal = normal.transpose(2, 0, 1) # HWC => CHW
 
-        return image, normal
+        return image, normal, seg
 
     def _load_raw_normal(self,raw_idx):
         
@@ -356,7 +407,7 @@ class DeepFashionDataset(Dataset):
         normal = (normal + 1) * 127.5
 
         if self._resolution and normal.shape[0] != self._resolution:
-            normal = cv2.resize(normal, (self._resolution, self._resolution))
+            normal = cv2.resize(normal, (self._resolution//2, self._resolution))
 
         normal = normal.transpose(2, 0, 1) # HWC => CHW
 
@@ -377,7 +428,7 @@ class DeepFashionDataset(Dataset):
             indices = np.where(np.all(image == color_orig, axis=-1))
             image[indices] = label_merger[color_orig]
         if self._resolution and image.shape[0] != self._resolution:
-            image = cv2.resize(image, (self._resolution, self._resolution))
+            image = cv2.resize(image, (self._resolution//2, self._resolutio))
         image = image.transpose(2, 0, 1) # HWC => CHW
         return image
 

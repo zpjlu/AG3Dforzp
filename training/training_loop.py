@@ -35,9 +35,17 @@ import dill
 import wandb
 import shutil
 from training.patch_utils import sample_patch_params, extract_patches, linear_schedule
+from training.zp import *
+
 
 #----------------------------------------------------------------------------
+def mask_to_png(sample_seg):
+    back_seg = -1 + np.ones_like(sample_seg)[...,-1:]*0.01
+    sample_seg = np.concatenate([back_seg,sample_seg],-1)
+    sample_seg = np.argmax(sample_seg, axis=-1)
+    return sample_seg
 
+#----------------------------------------------------------------------------
 def setup_snapshot_image_grid(training_set, random_seed=0):
     rnd = np.random.RandomState(random_seed)
     gw = np.clip(7680 // training_set.image_shape[2], 7, 8)
@@ -76,11 +84,36 @@ def setup_snapshot_image_grid(training_set, random_seed=0):
             label_groups[label] = [indices[(i + gw) % len(indices)] for i in range(len(indices))]
 
     # Load data.
-    images, segs, labels = zip(*[training_set[i] for i in grid_indices])
-    return (gw, gh), np.stack(images), np.stack(segs), np.stack(labels)
+    images, normals, segs, labels = zip(*[training_set[i] for i in grid_indices])
+    return (gw, gh), np.stack(segs), np.stack(normals), np.stack(labels)
 
 #----------------------------------------------------------------------------
 
+
+def save_seg_grid(img, fname, drange, grid_size):
+    lo, hi = drange
+    img = np.asarray(img, dtype=np.float32)
+    # img = (img - lo) * (255 / (hi - lo))
+    # img = np.rint(img).clip(0, 255).astype(np.uint8)
+
+    gw, gh = grid_size
+    _N, C, H, W = img.shape
+    img = img.reshape([gh, gw, C, H, W])
+    img = img.transpose(0, 3, 1, 4, 2)
+    img_small = img[:8,:,:8,:,:]
+    img_small = img_small.reshape([8 * H, 8 * W, C])
+ 
+    # wandb.log({title: [wandb.Image(img_small, caption=fname.split("/")[-1])]})
+    img = img.reshape([gh * H, gw * W, C])
+    img = mask_to_png(img)
+    img = PIL.Image.fromarray(img.astype(np.uint8))
+    cmap = np.load('cmap.npy')
+    img.putpalette(cmap.tolist())
+    img.save(fname)
+    
+    return img_small
+
+#----------------------------------------------------------------------------
 
 def save_image_grid(img, fname, drange, grid_size):
     lo, hi = drange
@@ -191,6 +224,7 @@ def training_loop(
     G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
     dataset_label_std = torch.tensor(training_set.get_label_std()).to(device)
     G.register_buffer('dataset_label_std', dataset_label_std)
+    common_kwargs['img_channels'] = 9
     D = dnnlib.util.construct_class_by_name(**D_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
     G_ema = copy.deepcopy(G).eval()
 
@@ -271,14 +305,15 @@ def training_loop(
     grid_c = None
     if rank == 0:
         print('Exporting sample images...')
-        grid_size, images, segs, labels = setup_snapshot_image_grid(training_set=training_set)
+        grid_size, segs, normals, labels = setup_snapshot_image_grid(training_set=training_set)
 
-        img_real = save_image_grid(images, os.path.join(run_dir, 'reals.png'), drange=[0,255], grid_size=grid_size)
-        seg_real = save_image_grid(segs, os.path.join(run_dir, 'reals_seg.png'), drange=[0,255], grid_size=grid_size)
+        seg_real = save_seg_grid(segs, os.path.join(run_dir, 'reals_seg.png'), drange=[0,255], grid_size=grid_size)
+        normal_real = save_image_grid(normals, os.path.join(run_dir, 'reals_normal.png'), drange=[0,255], grid_size=grid_size)
 
         # z noise
-        wandb.log({"real_image": [wandb.Image(img_real), wandb.Image(seg_real)]})
-        grid_z = torch.randn([labels.shape[0], G.z_dim], device=device).split(batch_gpu)
+        # wandb.log({"real_image": [wandb.Image(seg_real), wandb.Image(normal_real)]})
+        # grid_z = torch.randn([labels.shape[0], G.z_dim], device=device).split(batch_gpu)
+        grid_z = [mixing_noise(batch_gpu, G.z_dim, prob=0.9, device=device) for i in range(labels.shape[0] // batch_gpu)]
         
         # label parameters (batch, label_size)
         grid_c = torch.from_numpy(labels).to(device).split(batch_gpu)
@@ -330,14 +365,19 @@ def training_loop(
         # Fetch training data.
         with torch.autograd.profiler.record_function('data_fetch'):
             
-            phase_real_img, phase_real_seg, phase_real_c = next(training_set_iterator)
+            phase_real_img, phase_real_normal, phase_real_seg, phase_real_c = next(training_set_iterator)
             
             phase_real_img = (phase_real_img.to(device).to(torch.float32) / 127.5 - 1).split(batch_gpu)
-            phase_real_seg = (phase_real_seg.to(device).to(torch.float32) / 127.5 - 1).split(batch_gpu)
+            phase_real_normal = (phase_real_normal.to(device).to(torch.float32) / 127.5 - 1).split(batch_gpu)
+            phase_real_seg = phase_real_seg.to(device).to(torch.float32).split(batch_gpu)
+            # phase_real_seg = (phase_real_seg.to(device).to(torch.float32)*2 - 1).split(batch_gpu)
             phase_real_c = phase_real_c.to(device).split(batch_gpu)
             
-            all_gen_z = torch.randn([len(phases) * batch_size, G.z_dim], device=device)
-            all_gen_z = [phase_gen_z.split(batch_gpu) for phase_gen_z in all_gen_z.split(batch_size)]
+            #############################################################
+            # all_gen_z = torch.randn([len(phases) * batch_size, G.z_dim], device=device)
+            # all_gen_z = [phase_gen_z.split(batch_gpu) for phase_gen_z in all_gen_z.split(batch_size)]
+            all_gen_z = [[mixing_noise(batch_gpu, G.z_dim, prob=0.9, device=device) for i in range(batch_size // batch_gpu)] for j in range(len(phases))]
+            #############################################################
             all_gen_c = [training_set.get_label(np.random.randint(len(training_set))) for _ in range(len(phases) * batch_size)]
             all_gen_c = torch.from_numpy(np.stack(all_gen_c)).pin_memory().to(device)
             all_gen_c = [phase_gen_c.split(batch_gpu) for phase_gen_c in all_gen_c.split(batch_size)]
@@ -352,7 +392,8 @@ def training_loop(
             # Accumulate gradients.
             phase.opt.zero_grad(set_to_none=True)
             phase.module.requires_grad_(True)
-            for real_img, real_seg, real_c, gen_z, gen_c in zip(phase_real_img, phase_real_seg, phase_real_c, phase_gen_z, phase_gen_c):
+            # for real_img, real_seg, real_c, gen_z, gen_c in zip(phase_real_img, phase_real_normal, phase_real_c, phase_gen_z, phase_gen_c):
+            for real_img, real_seg, real_c, gen_z, gen_c in zip(phase_real_seg, phase_real_normal, phase_real_c, phase_gen_z, phase_gen_c):
                 loss.accumulate_gradients(phase=phase.name, real_img=real_img, real_seg=real_seg, real_c=real_c, gen_z=gen_z, gen_c=gen_c, gain=phase.interval, cur_nimg=cur_nimg)
             phase.module.requires_grad_(False)
 
@@ -443,7 +484,8 @@ def training_loop(
 
         # Save image snapshot.
         # if (rank == 0) and (image_snapshot_ticks is not None) and (done or cur_tick % image_snapshot_ticks == 0):
-        if (rank == 0) and (image_snapshot_ticks is not None) and (done or cur_nimg % image_snapshot_ticks == 0):
+        # if (rank == 0) and (image_snapshot_ticks is not None) and (done or cur_nimg % image_snapshot_ticks == 0):
+        if (rank == 0) and (image_snapshot_ticks is not None) and (done or cur_nimg % (image_snapshot_ticks*10) == 0 or (cur_nimg % image_snapshot_ticks == 0 and cur_nimg < 100)):
             with torch.no_grad():
                out = [G_ema(z=z, c=c,noise_mode='const') for z, c in zip(grid_z, grid_c)]
             images = torch.cat([o['image'].cpu() for o in out]).numpy()
@@ -452,8 +494,10 @@ def training_loop(
                 image_normal = torch.cat([o['image_normal'].cpu() for o in out]).numpy()
             images_depth = -torch.cat([o['image_depth'].cpu() for o in out]).numpy()
             
-            img_fake = save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg:09d}.png'), drange=[-1,1], grid_size=grid_size)
-            img_raw = save_image_grid(image_raw, os.path.join(run_dir, f'fakes{cur_nimg:09d}_raw.png'), drange=[-1,1], grid_size=grid_size)
+            # img_fake = save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg:09d}.png'), drange=[-1,1], grid_size=grid_size)
+            # img_raw = save_image_grid(image_raw, os.path.join(run_dir, f'fakes{cur_nimg:09d}_raw.png'), drange=[-1,1], grid_size=grid_size)
+            img_fake = save_seg_grid(images, os.path.join(run_dir, f'fakes{cur_nimg:09d}.png'), drange=[-1,1], grid_size=grid_size)
+            img_raw = save_seg_grid(image_raw, os.path.join(run_dir, f'fakes{cur_nimg:09d}_raw.png'), drange=[-1,1], grid_size=grid_size)
             img_depth = save_image_grid(images_depth, os.path.join(run_dir, f'fakes{cur_nimg:09d}_depth.png'), drange=[images_depth.min(), images_depth.max()], grid_size=grid_size)
             if is_normal:
                 img_normal = save_image_grid(image_normal, os.path.join(run_dir, f'fakes{cur_nimg:09d}_normal.png'), drange=[-1,1], grid_size=grid_size)
@@ -462,11 +506,11 @@ def training_loop(
             # img_depth = save_image_grid(images_depth, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}_depth.png'), drange=[images_depth.min(), images_depth.max()], grid_size=grid_size)
             # if is_normal:
             #     img_normal = save_image_grid(image_normal, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}_normal.png'), drange=[-1,1], grid_size=grid_size)
-            if is_normal:
-                wandb.log({"ouput_images": [wandb.Image(img_fake),wandb.Image(img_raw), wandb.Image(img_depth), wandb.Image(img_normal)]})
-                del img_normal
-            else:
-                wandb.log({"ouput_images": [wandb.Image(img_fake),wandb.Image(img_raw), wandb.Image(img_depth)]})
+            # if is_normal:
+            #     wandb.log({"ouput_images": [wandb.Image(img_fake),wandb.Image(img_raw), wandb.Image(img_depth), wandb.Image(img_normal)]})
+            #     del img_normal
+            # else:
+            #     wandb.log({"ouput_images": [wandb.Image(img_fake),wandb.Image(img_raw), wandb.Image(img_depth)]})
             
             del img_fake
             del img_depth

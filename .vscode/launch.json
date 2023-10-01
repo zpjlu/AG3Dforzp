@@ -11,14 +11,18 @@
             "program": "${file}",
             "console": "integratedTerminal",
             "justMyCode": true,
-            "env": {"CUDA_VISIBLE_DEVICES":"3"},
-            "args": ["--outdir", "0925",
+            "env": {"CUDA_VISIBLE_DEVICES":"2"},
+            "args": ["--outdir", "out/1001test",
             "--cfg", "deepfashion",
             "--data", "/home/zhengpeng/EVA3D/datasets/DeepFashion/images",
             "--gpus", "1",
             "--batch", "1",
             "--gamma", "0.001",
-            "--is_sdf", "True"]
+            "--is_sdf", "True",
+            "--cbase", "8192",
+            "--normal_gan", "True",
+            "--face_gan", "True",
+            "--density_reg", "0"]
         }
     ]
 }
